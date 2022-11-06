@@ -23,6 +23,7 @@ class IllegalMove(Exception):
     pass
 
 def stack(flat, layers=16):
+  return flat
   """Convert an [4, 4] representation into [4, 4, layers] with one layers for each value."""
   # representation is what each layer represents
   representation = 2 ** (np.arange(layers, dtype=int) + 1)
@@ -40,6 +41,11 @@ class Game2048Env(gym.Env):
     metadata = {'render.modes': ['ansi', 'human', 'rgb_array']}
 
     def __init__(self):
+
+        # extra flags
+        self.game_end_negative = True
+        self.log2_scoring = True
+        
         # Definitions for game. Board must be square.
         self.size = 4
         self.w = self.size
@@ -53,7 +59,8 @@ class Game2048Env(gym.Env):
         self.action_space = spaces.Discrete(4)
         # Suppose that the maximum tile is as if you have powers of 2 across the board.
         layers = self.squares
-        self.observation_space = spaces.Box(0, 1, (self.w, self.h, layers), dtype=int)
+        # self.observation_space = spaces.Box(0, 1, (self.w, self.h, layers), dtype=int)
+        self.observation_space = spaces.Box(0, np.inf, (self.w, self.h), dtype=int)
         self.set_illegal_move_reward(0.)
         self.set_max_tile(None)
 
@@ -94,12 +101,15 @@ class Game2048Env(gym.Env):
             'illegal_move': False,
         }
         try:
-            score = float(self.move(action))
+            score, _ = self.move(action)
+            score = float(score)
             self.score += score
             assert score <= 2**(self.w*self.h)
             self.add_tile()
             done = self.isend()
             reward = float(score)
+            if done and self.game_end_negative:
+                reward -= 1000
         except IllegalMove:
             logging.debug("Illegal move")
             info['illegal_move'] = True
@@ -147,15 +157,14 @@ class Game2048Env(gym.Env):
             pil_board = Image.new("RGB", (grid_size * 4, grid_size * 4))
             draw = ImageDraw.Draw(pil_board)
             draw.rectangle([0, 0, 4 * grid_size, 4 * grid_size], grey)
-            fnt = ImageFont.truetype('Arial.ttf', 30)
 
             for y in range(4):
               for x in range(4):
                  o = self.get(y, x)
                  if o:
                      draw.rectangle([x * grid_size, y * grid_size, (x + 1) * grid_size, (y + 1) * grid_size], tile_colour_map[o])
-                     (text_x_size, text_y_size) = draw.textsize(str(o), font=fnt)
-                     draw.text((x * grid_size + (grid_size - text_x_size) // 2, y * grid_size + (grid_size - text_y_size) // 2), str(o), font=fnt, fill=white)
+                     (text_x_size, text_y_size) = draw.textsize(str(o))
+                     draw.text((x * grid_size + (grid_size - text_x_size) // 2, y * grid_size + (grid_size - text_y_size) // 2), str(o), fill=white)
                      assert text_x_size < grid_size
                      assert text_y_size < grid_size
 
@@ -173,9 +182,10 @@ class Game2048Env(gym.Env):
     # Implement 2048 game
     def add_tile(self):
         """Add a tile, probably a 2 but maybe a 4"""
-        possible_tiles = np.array([2, 4])
-        tile_probabilities = np.array([0.9, 0.1])
-        val = self.np_random.choice(possible_tiles, 1, p=tile_probabilities)[0]
+        # possible_tiles = np.array([2, 4])
+        # tile_probabilities = np.array([0.9, 0.1])
+        # val = self.np_random.choice(possible_tiles, 1, p=tile_probabilities)[0]
+        val = 2
         empties = self.empties()
         assert empties.shape[0]
         empty_idx = self.np_random.choice(empties.shape[0])
@@ -223,6 +233,7 @@ class Game2048Env(gym.Env):
         rx = list(range(self.w))
         ry = list(range(self.h))
 
+        matrix = []
         if dir_mod_two == 0:
             # Up or down, split into columns
             for y in range(self.h):
@@ -234,6 +245,8 @@ class Game2048Env(gym.Env):
                     if not trial:
                         for x in rx:
                             self.set(x, y, new[x])
+                matrix.append(new)
+            matrix = np.array(matrix).T
         else:
             # Left or right, split into rows
             for x in range(self.w):
@@ -245,10 +258,13 @@ class Game2048Env(gym.Env):
                     if not trial:
                         for y in ry:
                             self.set(x, y, new[y])
+                matrix.append(new)
+            matrix = np.array(matrix)
+
         if changed != True:
             raise IllegalMove
 
-        return move_score
+        return move_score, matrix
 
     def combine(self, shifted_row):
         """Combine same tiles when moving to one side. This function always
@@ -265,6 +281,8 @@ class Game2048Env(gym.Env):
             if p[0] == p[1]:
                 combined_row[output_index] += p[1]
                 move_score += p[0] + p[1]
+                if self.log2_scoring:
+                    move_score = np.log2(move_score)
                 # Skip the next thing in the list.
                 skip = True
             output_index += 1
@@ -311,6 +329,22 @@ class Game2048Env(gym.Env):
             except IllegalMove:
                 pass
         return True
+
+    def transition_fn(self):
+        
+        transition_dict = {}
+
+        for direction in range(4):
+            try:
+                _, result = self.move(direction, trial=True)
+                transition_dict[direction] = result
+            except IllegalMove:
+                pass
+        return transition_dict
+
+    def action_masks(self):
+        possible_transitions = self.transition_fn()
+        return [action in possible_transitions for action in range(4)]
 
     def get_board(self):
         """Retrieve the whole board, useful for testing."""
